@@ -18,6 +18,38 @@ def crop_lon_wrap(arr: np.ndarray, top: int, left: int, ph: int, pw: int) -> np.
     return np.concatenate([patch_lat[:, :, left:W], patch_lat[:, :, 0:r]], axis=-1)
 
 
+def _prepare_sample(
+    x: np.ndarray,
+    m: np.ndarray,
+    *,
+    fill_invalid: float,
+    mean: Optional[np.ndarray],
+    std: Optional[np.ndarray],
+    norm_clamp: float,
+) -> Tuple[np.ndarray, np.ndarray]:
+    x = x.astype(np.float32, copy=False)
+    m = m.astype(np.float32, copy=False)
+
+    m = np.nan_to_num(m, nan=0.0, posinf=0.0, neginf=0.0)
+    m = (m > 0.5).astype(np.float32, copy=False)
+
+    finite = np.isfinite(x)
+    if not finite.all():
+        m = m * finite.astype(np.float32)
+        x = np.nan_to_num(x, nan=fill_invalid, posinf=fill_invalid, neginf=fill_invalid)
+
+    if fill_invalid != 0.0 or not np.all(m > 0.5):
+        x = np.where(m > 0.5, x, fill_invalid).astype(np.float32, copy=False)
+
+    if mean is not None and std is not None:
+        x = (x - mean[:, None, None]) / (std[:, None, None] + 1e-6)
+        if norm_clamp > 0:
+            x = np.clip(x, -norm_clamp, norm_clamp)
+        x = np.where(m > 0.5, x, 0.0).astype(np.float32, copy=False)
+
+    return x, m
+
+
 class AMSUARandomPatchDataset(Dataset):
     def __init__(
         self,
@@ -81,24 +113,14 @@ class AMSUARandomPatchDataset(Dataset):
                 raise ValueError(f"{rel}: feature={F} != in_channels={self.in_channels}")
 
             t = np.random.randint(0, T)
-            x = X[t].astype(np.float32)
-            m = M[t].astype(np.float32)
-
-            m = np.where(np.isfinite(m), m, 0.0)
-            m = (m > 0.5).astype(np.float32)
-
-            finite = np.isfinite(x)
-            if not finite.all():
-                m = m * finite.astype(np.float32)
-                x = np.nan_to_num(x, nan=self.fill_invalid, posinf=self.fill_invalid, neginf=self.fill_invalid)
-
-            x = np.where(m > 0.5, x, self.fill_invalid).astype(np.float32)
-
-            if self.mean is not None and self.std is not None:
-                x = (x - self.mean[:, None, None]) / (self.std[:, None, None] + 1e-6)
-                if self.norm_clamp > 0:
-                    x = np.clip(x, -self.norm_clamp, self.norm_clamp)
-                x = np.where(m > 0.5, x, 0.0).astype(np.float32)
+            x, m = _prepare_sample(
+                X[t],
+                M[t],
+                fill_invalid=self.fill_invalid,
+                mean=self.mean,
+                std=self.std,
+                norm_clamp=self.norm_clamp,
+            )
 
             top = np.random.randint(0, H - self.patch_h + 1)
             left = np.random.randint(0, W)
@@ -188,23 +210,14 @@ class AMSUAEvalPatchDataset(Dataset):
         rel = self.files[file_idx]
         X, M = self._load(rel)
 
-        x = X[t].astype(np.float32)
-        m = M[t].astype(np.float32)
-
-        m = np.where(np.isfinite(m), m, 0.0)
-        m = (m > 0.5).astype(np.float32)
-
-        finite = np.isfinite(x)
-        if not finite.all():
-            m = m * finite.astype(np.float32)
-            x = np.nan_to_num(x, nan=self.fill_invalid, posinf=self.fill_invalid, neginf=self.fill_invalid)
-
-        x = np.where(m > 0.5, x, self.fill_invalid).astype(np.float32)
-
-        if self.mean is not None and self.std is not None:
-            x = (x - self.mean[:, None, None]) / (self.std[:, None, None] + 1e-6)
-            x = np.clip(x, -self.norm_clamp, self.norm_clamp)
-            x = np.where(m > 0.5, x, 0.0).astype(np.float32)
+        x, m = _prepare_sample(
+            X[t],
+            M[t],
+            fill_invalid=self.fill_invalid,
+            mean=self.mean,
+            std=self.std,
+            norm_clamp=self.norm_clamp,
+        )
 
         x_patch = crop_lon_wrap(x, top, left, self.patch_h, self.patch_w)
         m_patch = crop_lon_wrap(m, top, left, self.patch_h, self.patch_w)
